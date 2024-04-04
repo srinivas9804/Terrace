@@ -1,3 +1,7 @@
+#ifndef TERRACE_GRAPH
+#define TERRACE_GRAPH
+#define NO_TLX
+
 #include <vector>
 #include <fstream>
 #include <vector>
@@ -10,13 +14,15 @@
 #include "absl/container/btree_set.h"
 #include "absl/container/btree_map.h"
 
+#include "PMA/CPMA.hpp"
+
 #define IN_PLACE 5
 #define PMA_SIZE 5
 class TerraceGraph{
 private:
         size_t nodes;
         size_t edges;
-        std::vector<std::array<int,IN_PLACE>> level1;
+        std::vector<int> level1;
         std::vector<int> outDegree;
         absl::btree_map<int,absl::btree_set<int>> level2;
         std::vector<absl::btree_set<int>> level3;
@@ -31,7 +37,8 @@ public:
         
         void add_edge(int u, int v, int w){
                 if(outDegree[u] < IN_PLACE){
-                        level1[u][outDegree[u]] = v;
+                        int index = u * IN_PLACE + outDegree[u];
+                        level1[index] = v;
                 }
                 else if(outDegree[u] < IN_PLACE + PMA_SIZE){
                         level2[u].insert(v);
@@ -40,6 +47,21 @@ public:
                         level3[u].insert(v);
                 }
                 outDegree[u]++;
+        }
+
+        void add_edges(std::vector<int> u, std::vector<int> v, std::vector<int> w){
+                edges = u.size();
+                for(auto i = 0; i < u.size();i++){
+                        add_edge(u[i],v[i],0);
+                }
+        }
+
+        TerraceGraph(size_t n){
+                nodes = n;
+                edges = 0;
+                level1.resize(IN_PLACE * n);
+                level3.resize(n);
+                outDegree.resize(n);
         }
 
         TerraceGraph(std::string filename, bool isSymmetric){
@@ -63,7 +85,7 @@ public:
                 }
                 std::cout << nodes << "," << edges << std::endl;
                 outDegree.resize(nodes);
-                level1.resize(nodes);
+                level1.resize(nodes * IN_PLACE);
                 level3.resize(nodes);
                 std::vector<int> nodeIndex(nodes);
                 for(int i=0;i<(int)nodes;i++){
@@ -95,20 +117,38 @@ public:
         template <class F> void map_neighbors (size_t i, F f) const {
                 int val = 0;
                 if(outDegree[i] > 0){
-                        for(auto elem: level1){
-                                for(auto j=0;j<(int)elem.size() && j < outDegree[(int)i];j++){
-                                        f(i,elem[j],val);
-                                }
+                        size_t startIndex = IN_PLACE * i;
+                        for(size_t j = 0;j < IN_PLACE && j < outDegree[(int)i]; j++){
+                                f(i,level1[startIndex + j],NULL);
                         }
                 }
                 if(outDegree[i] > IN_PLACE){
                         for(auto& elem : level2.at(i)){
-                                f(i,elem,val);
+                                f(i,elem,NULL);
                         }
                 }
                 if(outDegree[i] > PMA_SIZE){
                         for(auto elem : level3[i]){
-                                f(i,elem,val);
+                                f(i,elem,NULL);
+                        }
+                }
+        }
+
+        template <class F, class W> void map_neighbors (size_t i, F f, W w) const {
+                if(outDegree[i] > 0){
+                        size_t startIndex = IN_PLACE * i;
+                        for(size_t j = 0;j < IN_PLACE && j < outDegree[(int)i]; j++){
+                                f(i,level1[startIndex + j],w);
+                        }
+                }
+                if(outDegree[i] > IN_PLACE){
+                        for(auto& elem : level2.at(i)){
+                                f(i,elem,w);
+                        }
+                }
+                if(outDegree[i] > PMA_SIZE){
+                        for(auto elem : level3[i]){
+                                f(i,elem,w);
                         }
                 }
         }
@@ -145,20 +185,19 @@ public:
                 size_t count = 0;
                 int val = 0;
                 if(outDegree[i] > 0){
-                        for(auto elem: level1){
-                                for(auto j=0;j<elem.size() && j < outDegree[(int)i];j++){
-                                        count += f(i,elem[j],val);
-                                }
+                        size_t startIndex = IN_PLACE * i;
+                        for(size_t j = 0;j < IN_PLACE && j < outDegree[(int)i]; j++){
+                                count += f(i,level1[startIndex + j],NULL);
                         }
                 }
                 if(outDegree[i] > IN_PLACE){
                         for(auto& elem : level2.at(i)){
-                                count += f(i, elem, val);
+                                count += f(i, elem, NULL);
                         }
                 }
                 if(outDegree[i] > PMA_SIZE){
                         for(auto elem : level3[i]){
-                                count += f(i, elem, val);
+                                count += f(i, elem, NULL);
                         }
                 }
                 return count;
@@ -182,3 +221,6 @@ public:
                 return map_reduce_neighbors(id,f,reduce);
         }
 };
+
+
+#endif

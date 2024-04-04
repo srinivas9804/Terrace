@@ -11,8 +11,11 @@ void TerraceGraph::add_edge(int u, int v, int w){
    else{
       level3[u].insert(v);
    }
-
    degree[u]++;
+}
+
+void TerraceGraph::TerraceGraph(size_t n){
+   
 }
 TerraceGraph::TerraceGraph(std::string filename, bool isSymmetric){
    std::ifstream inputFile;
