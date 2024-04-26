@@ -9,5 +9,6 @@ cc_library(
     "@cpma//PMA:cpma",
     "@cpma//PMA:pcsr",
     "@CPAM//cpam",
+    "@parlaylib//parlay:parallel",
   ],
 )

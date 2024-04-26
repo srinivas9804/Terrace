@@ -13,6 +13,7 @@
 
 #include "PMA/PCSR.hpp"
 #include "cpam/cpam.h"
+#include "parlay/parallel.h"
 
 #define IN_PLACE 13
 #define PMA_SIZE 1024
@@ -23,20 +24,29 @@ private:
                 using key_t = uint32_t;  // a vertex_id
                 static inline bool comp(key_t a, key_t b) { return a < b; }
         };
+        
+        typedef struct __attribute__ ((__packed__)) {
+                uint32_t degree; // 4 Bytes
+                std::array<uint32_t,IN_PLACE> neighbors; // 4*13=52 Bytes
+        #if WEIGHTED
+                uint32_t weights[NUM_IN_PLACE_NEIGHBORS]; // 4*14*2=112 Bytes
+                uint32_t padding; // 4 Bytes padding (112+4+4+8=128)
+        #endif
+                cpam::diff_encoded_set<edge_entry, 64>* cpam_neighbors{nullptr};  // 8 Bytes
+        } level1_block;
+
         size_t nodes;
         size_t edges;
-        std::vector<int> level1;
-        std::vector<int> outDegree;
+        level1_block* l1_block;
         PCSR<simple_pcsr_settings<uint32_t>> cpma;
-        std::vector<cpam::diff_encoded_set<edge_entry, 64>*> level3;
 public:
         static std::conditional<false, void*, void*> short_mode;
         static const bool support_insert_batch = false;
         struct weight_type{};
         size_t N() const {return nodes;}
         size_t M() const {return edges;}
-        auto out_degree(size_t i) const { return outDegree[(int)i]; }
-        auto in_degree(size_t i) const { return outDegree[(int)i]; }
+        auto out_degree(size_t i) const { return l1_block[i].degree; }
+        auto in_degree(size_t i) const { return l1_block[i].degree; }
 
         void build_batch(std::vector<std::tuple<int,int,int>> edgesStruct, bool sorted = false){
                 if(!sorted){
@@ -50,37 +60,40 @@ public:
                 edges = edgesStruct.size();
                 int lastSrc = std::get<0>(edgesStruct.back());
                 increaseSize(lastSrc+1);
-                for(const auto &edge : edgesStruct){
-                        int src = std::get<0>(edge);
-                        outDegree[src]++;
-                }
+                std::vector<std::atomic<uint32_t>> degree(lastSrc+1);
+                parlay::parallel_for(0,edgesStruct.size(),[&](size_t i){
+                        int src = std::get<0>(edgesStruct[i]);
+                        degree[src]++;
+                });
+                parlay::parallel_for(0,lastSrc+1,[&](size_t i){
+                        l1_block[i].degree = degree[i];
+                });
+                // for(const auto &edge : edgesStruct){
+                //         int src = std::get<0>(edge);
+                //         l1_block[src].degree++;
+                // }
 
                 int startIndex = 0;
                 int expectedPma = 0;
                 std::vector<std::tuple<uint32_t,uint32_t>> pmaVector;
                 for(size_t i=0;i<nodes;i++){
-                        if(outDegree[i] > 0){
+                        uint32_t deg = l1_block[i].degree;
+                        if(deg > 0){
                                 size_t j =0;
-                                for(;j < outDegree[i] && j < IN_PLACE;j++){
+                                for(;j < deg && j < IN_PLACE;j++){
                                         auto [src,dest,weight] = edgesStruct[startIndex++];
-                                        int index = src * IN_PLACE + j;
-                                        if(index >= level1.size()){
-                                                std::cout << "What is happening?" << std::endl;
-                                        }
-                                        level1[index] = dest;
+                                        l1_block[src].neighbors[j] = dest;
                                 }
-                                if(outDegree[i] > IN_PLACE){
-                                        if(outDegree[i] > PMA_SIZE + IN_PLACE){
-                                                for(;j < outDegree[i];j++){
+                                if(deg > IN_PLACE){
+                                        if(deg > PMA_SIZE + IN_PLACE){
+                                                l1_block[i].cpam_neighbors = new cpam::diff_encoded_set<edge_entry, 64>();
+                                                for(;j < deg;j++){
                                                         auto [src,dest,weight] = edgesStruct[startIndex++];
-                                                        if(level3[src] == nullptr)
-                                                                level3[src] = new cpam::diff_encoded_set<edge_entry, 64>();
-                                                        level3[src]->insert(dest);
+                                                        l1_block[src].cpam_neighbors->insert(dest);
                                                 } 
                                         }
                                         else{
-                                                expectedPma += outDegree[i] - IN_PLACE;
-                                                for(;j < outDegree[i];j++){
+                                                for(;j < deg;j++){
                                                         auto [src,dest,weight] = edgesStruct[startIndex++];
                                                         std::tuple<uint64_t,uint64_t> edge(src,dest);
                                                         pmaVector.push_back(edge);
@@ -98,19 +111,31 @@ public:
 
         void increaseSize(int nodeCount){
                 if(nodeCount > nodes){
+                        if(l1_block == nullptr)
+                                l1_block = (level1_block*) malloc(nodeCount * sizeof(*l1_block));
+                        else{
+                                l1_block = (level1_block*) realloc(l1_block, nodeCount * sizeof(*l1_block));
+                        }
+                        if(!l1_block){
+                                std::cerr << "Could not allocate memory to l1_block" << std::endl;
+                                std::terminate();
+                        }
+                        for(int i = nodes; i < nodeCount; i++){
+                                l1_block[i].degree = 0;
+                                l1_block[i].cpam_neighbors = nullptr;
+                        }
                         nodes = nodeCount;
-                        level1.resize(IN_PLACE * nodes);
-                        outDegree.resize(nodes);
-                        level3.resize(nodes);
                 }
         }
 
         TerraceGraph(size_t n) : cpma(n){
                 nodes = n;
                 edges = 0;
-                level1.resize(IN_PLACE * n);
-                level3.resize(n);
-                outDegree.resize(n);
+                l1_block = (level1_block*) malloc(n * sizeof(*l1_block));
+                for(int i=0; i < n; i++){
+                        l1_block[i].degree = 0;
+                        l1_block[i].cpam_neighbors = nullptr;
+                }
         }
 
         TerraceGraph(std::string filename, bool isSymmetric) : cpma(0){
@@ -134,9 +159,7 @@ public:
                 }
                 std::vector<std::tuple<int,int,int>> edgesStruct;
                 std::cout << nodes << "," << edges << std::endl;
-                outDegree.resize(nodes);
-                level1.resize(nodes * IN_PLACE);
-                level3.resize(nodes);
+                increaseSize(nodes);
                 std::vector<int> nodeIndex(nodes);
                 for(int i=0;i<(int)nodes;i++){
                         inputFile >> nodeIndex[i];
@@ -161,18 +184,13 @@ public:
         }
 
         template <class F1, class F2, class F3, class W> void map_neighbors (size_t i, F1 f1, F2 f2, F3 f3, W w) const {
-                if(outDegree[i] > 0){
-                        size_t startIndex = IN_PLACE * i;
-                        for(size_t j = 0;j < IN_PLACE && j < outDegree[(int)i]; j++){
-                                if((startIndex + j) > level1.size()){
-                                        std::cout << "Maybe error?" << std::endl;
-                                }
-                                f1(i,level1[startIndex + j],w);
-                        }
+                size_t j = 0;
+                for(;j < IN_PLACE && j < l1_block[i].degree; j++){
+                        f1(i,l1_block[i].neighbors[j],w);
                 }
-                if(outDegree[i] > IN_PLACE){
-                        if(outDegree[i] > (IN_PLACE + PMA_SIZE)){
-                                level3[i]->iterate_seq(f3);
+                if(l1_block[i].degree >= IN_PLACE){
+                        if(l1_block[i].cpam_neighbors != nullptr){
+                                l1_block[i].cpam_neighbors->iterate_seq(f3);
                         }
                         else{
                                 cpma.map_neighbors(i,f2, nullptr, false);

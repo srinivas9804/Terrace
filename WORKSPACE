@@ -16,7 +16,7 @@ local_repository(
 
 local_repository(
     name="parlaylib",
-    path="./external/Packed-Memory-Array/parlaylib/include",
+    path="./external/parlaylib/include",
 )
 local_repository(
     name="soa",
